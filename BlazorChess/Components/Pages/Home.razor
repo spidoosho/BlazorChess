@@ -1,0 +1,589 @@
+﻿@page "/"
+@using System.Text
+@using Newtonsoft.Json
+@using BlazorChess.Utility
+@using BlazorChessMiddleware
+@rendermode InteractiveServer
+@inject NavigationManager Navigation
+@implements IAsyncDisposable
+
+<PageTitle>BlazorChess</PageTitle>
+
+<BlazorChess.Components.Modals.PromotionModal OnModalClosed="PromotionModalOnClosed" @ref="PromotionModal"></BlazorChess.Components.Modals.PromotionModal>
+<BlazorChess.Components.Modals.RefreshModal OnModalClosed="RefreshModalOnClosed" @ref="RefreshModal"></BlazorChess.Components.Modals.RefreshModal>
+<BlazorChess.Components.Modals.DrawModal OnModalClosed="DrawModalOnClosed" @ref="DrawModal"></BlazorChess.Components.Modals.DrawModal>
+
+<div class="container-fluid">
+    <div class="row justify-content-md-center">
+        <div class="col chess_column" style="background-color:#aaa;">
+            <div class="chessboard">
+                @{
+                    @for (int yIndex = 0; yIndex < yIndices.Length; yIndex++)
+                    {
+                        @for (int xIndex = 0; xIndex < xIndices.Length; xIndex++)
+                        {
+                            var localX = xIndices[xIndex];
+                            var localY = yIndices[yIndex];
+                            string color = (localX + localY) % 2 == 1 ? "white" : "black";
+                            <div class="@(color + BoardStyle[localX, localY])" @onclick="() => ProcessOnClick(localX, localY)">
+                                @(Board[localX, localY] != '\0' ? convertCharToUnicode(Board[localX, localY]) : "")
+                            </div>
+                        }
+                    }
+                }
+            </div>
+        </div>
+        <div class="playersTable col-lg-3">
+            <div class="form-group">
+                <label>
+                    Join via lobby ID: <input @bind="codeInput" />
+                    <button type="button" class="btn-primary" @onclick="JoinLobby" disabled="@(!IsConnected || status == BlazorConstants.Status.InGame)">Join</button>
+                </label>
+                <br /><br />
+                <button type="button" style="margin-right:5px" class="btn btn-primary" @onclick="CreateLobby" disabled="@(!IsConnected || status == BlazorConstants.Status.InGame)">Create a lobby</button>@(message)
+            </div>
+            <table>
+                <tr>
+                    <th>Player</th>
+                    <th>Side chosen</th>
+                    <th>Ready</th>
+                </tr>
+                <tr>
+                    <td>You</td>
+                    <td>@(myColor.ToString())</td>
+                    <td>@(myReady)</td>
+                </tr>
+                <tr>
+                    <td>@(opponent)</td>
+                    <td>@(opponentColor.ToString())</td>
+                    <td>@(opponentReady)</td>
+                </tr>
+            </table>
+            <br />
+            <button type="button" @onclick="OfferDraw" disabled="@(!IsConnected || status != BlazorConstants.Status.InGame)" class="btn btn-primary">Offer draw</button>
+            <button type="button" @onclick="Forfeited" disabled="@(!IsConnected || status != BlazorConstants.Status.InGame)" class="btn btn-primary">Forfeit</button>
+            <button type="button" @onclick="ReadyUp" disabled="@(!IsConnected || status != BlazorConstants.Status.InLobby)" class="btn btn-success">Ready</button>
+        </div>
+    </div>
+</div>
+
+@code {
+    private BlazorChess.Components.Modals.PromotionModal? PromotionModal { get; set; }
+    private BlazorChess.Components.Modals.RefreshModal? RefreshModal { get; set; }
+    private BlazorChess.Components.Modals.DrawModal? DrawModal { get; set; }
+
+    private char? Promotionpiece { get; set; }
+
+    private HubConnection? hubConnection;
+    public bool IsConnected => hubConnection?.State == HubConnectionState.Connected;
+
+    private string? codeInput;
+    private string? message = "";
+    private MiddlewareConstants.PIECE_COLOR? myColor;
+    private string? myReady;
+
+    private string? opponent = "";
+    private MiddlewareConstants.PIECE_COLOR? opponentColor;
+    private string? opponentReady = "";
+
+    private BlazorConstants.Status status = BlazorConstants.Status.None;
+    private string? lobbyId = null;
+
+    // reversed indices for better board manipulation
+    private int[] xIndices = new int[] { 0, 1, 2, 3, 4, 5, 6, 7 };
+    private int[] yIndices = new int[] { 7, 6, 5, 4, 3, 2, 1, 0 };
+
+    private char[,] Board = new char[8, 8];
+    private string[,] BoardStyle = new string[8, 8];
+    private Dictionary<(int X, int Y), List<(int X, int Y)>> PossibleMoves = new();
+    private (int X, int Y)? chosenTile = null;
+    private (int X, int Y)? promotionTile = null;
+
+    List<(int X, int Y)> attackingPos = new List<(int X, int Y)>();
+    (int X, int Y)? checkedKing = null;
+
+    /// <summary>
+    /// Resets variables to intial values
+    /// </summary>
+    private void Reset()
+    {
+        Promotionpiece = null;
+        codeInput = null;
+        message = "";
+        myColor = null;
+        myReady = null;
+
+        opponent = "";
+        opponentColor = null;
+        opponentReady = "";
+
+        status = BlazorConstants.Status.None;
+        lobbyId = null;
+
+        Board = new char[8, 8];
+        BoardStyle = new string[8, 8];
+        PossibleMoves = new();
+        chosenTile = null;
+        promotionTile = null;
+
+        attackingPos = new List<(int X, int Y)>();
+        checkedKing = null;
+    }
+
+    /// <summary>
+    /// Starts hub connection and defines methods to be called by BaseChessHub
+    /// </summary>
+    /// <exception cref="ArgumentNullException"></exception>
+    protected override async Task OnInitializedAsync()
+    {
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl(Navigation.ToAbsoluteUri("/chesshub"))
+            .Build();
+
+        Reset();
+
+        // display message from hub
+        hubConnection.On<string>("ReceiveMessage", (message) =>
+        {
+            this.message = message;
+            InvokeAsync(StateHasChanged);
+        });
+
+        // both players are in the lobby, prepares for ready up
+        hubConnection.On<string, string>("LobbyReady", (assignedColor, lobbyId) =>
+        {
+            this.lobbyId = lobbyId;
+            opponent = BlazorConstants.OPPONENT;
+
+            myReady = BlazorConstants.NOT_READY;
+            opponentReady = BlazorConstants.NOT_READY;
+
+            // set variables based on assigned color
+            if (assignedColor == MiddlewareConstants.PIECE_COLOR.White.ToString())
+            {
+                myColor = MiddlewareConstants.PIECE_COLOR.White;
+                opponentColor = MiddlewareConstants.PIECE_COLOR.Black;
+                // rotate board based on color by changing indices in view for cycle
+                xIndices = new int[] { 0, 1, 2, 3, 4, 5, 6, 7 };
+                yIndices = new int[] { 7, 6, 5, 4, 3, 2, 1, 0 };
+            }
+            else
+            {
+                myColor = MiddlewareConstants.PIECE_COLOR.Black;
+                opponentColor = MiddlewareConstants.PIECE_COLOR.White;
+                // rotate board based on color by changing indices in view for cycle
+                xIndices = new int[] { 7, 6, 5, 4, 3, 2, 1, 0 };
+                yIndices = new int[] { 0, 1, 2, 3, 4, 5, 6, 7 };
+            }
+
+            status = BlazorConstants.Status.InLobby;
+
+            InvokeAsync(StateHasChanged);
+        });
+
+        // lobby owner disconnected, changes the lobby owner to current player
+        hubConnection.On<string>("LobbyOwnerMoved", (lobbyId) =>
+        {
+            this.lobbyId = lobbyId;
+            this.message = $"You are the owner of lobby {lobbyId}";
+            InvokeAsync(StateHasChanged);
+        });
+
+        // hub changed player to ready
+        hubConnection.On("PlayerReady", () =>
+        {
+            myReady = BlazorConstants.READY;
+            InvokeAsync(StateHasChanged);
+        });
+
+        // hub changed opponent to ready
+        hubConnection.On("OpponentReady", () =>
+        {
+            opponentReady = BlazorConstants.READY;
+            InvokeAsync(StateHasChanged);
+        });
+
+        // hub ended the game
+        hubConnection.On<string>("GameEnded", (message) =>
+        {
+            this.message = message;
+
+            RefreshModal?.Open(message);
+            InvokeAsync(StateHasChanged);
+        });
+
+        // enemy proposed a draw
+        hubConnection.On("DrawOffered", () =>
+        {
+            DrawModal?.Open();
+            InvokeAsync(StateHasChanged);
+        });
+
+        // current player is on move
+        hubConnection.On<string>("MakeMove", (state) =>
+        {
+            // starting point for white => sets status
+            status = BlazorConstants.Status.InGame;
+            ResetStyles();
+
+            var deserializedState = JsonConvert.DeserializeObject<BlazorChessMiddleware.UserState>(state);
+            if (deserializedState == null)
+            {
+                throw new ArgumentNullException();
+            }
+
+            PossibleMoves = new(deserializedState.possibleMoves);
+
+            Board = deserializedState.Board;
+            attackingPos = deserializedState.AttackingPieces;
+            checkedKing = deserializedState.CheckedKingPos;
+
+            HighlightAttacks();
+            SetHoverForPossibleMoves();
+
+            this.message = $"Your move";
+            InvokeAsync(StateHasChanged);
+        });
+
+        // opponent is on move
+        hubConnection.On<string>("UpdateBoard", (state) =>
+        {
+            // starting point for black => sets status
+            status = BlazorConstants.Status.InGame;
+            opponentReady = BlazorConstants.READY;
+            ResetStyles();
+
+            var deserializedState = JsonConvert.DeserializeObject<BlazorChessMiddleware.UserState>(state);
+            if (deserializedState == null)
+            {
+                throw new ArgumentNullException();
+            }
+
+            Board = deserializedState.Board;
+            attackingPos = deserializedState.AttackingPieces;
+            checkedKing = deserializedState.CheckedKingPos;
+
+            HighlightAttacks();
+
+            this.message = $"Opponent move";
+            InvokeAsync(StateHasChanged);
+        });
+
+        await hubConnection.StartAsync();
+    }
+
+    /// <summary>
+    /// Sends a CreateLobby request to ChessHub
+    /// </summary>
+    private async Task CreateLobby()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.SendAsync("CreateLobby");
+        }
+    }
+
+    /// <summary>
+    /// Sends a JoinLobby request to ChessHub
+    /// </summary>
+    private async Task JoinLobby()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.SendAsync("JoinLobby", codeInput);
+        }
+    }
+
+    /// <summary>
+    /// Sends a ReadyUp request to ChessHub
+    /// </summary>
+    private async Task ReadyUp()
+    {
+        if (hubConnection is not null)
+        {
+            myReady = BlazorConstants.READY;
+            await hubConnection.SendAsync("ReadyUp");
+        }
+    }
+
+    /// <summary>
+    /// Sends a OfferDraw request to ChessHub
+    /// </summary>
+    private async Task OfferDraw()
+    {
+        if (hubConnection is not null)
+        {
+            this.message = "Draw offered";
+            await hubConnection.SendAsync("OfferDraw", lobbyId);
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    /// <summary>
+    /// Sends a Forfeited request to ChessHub
+    /// </summary>
+    private async Task Forfeited()
+    {
+        if (hubConnection is not null)
+        {
+            this.message = "Forfeited";
+            await hubConnection.SendAsync("PlayerForfeited", lobbyId);
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    /// <summary>
+    /// Sends a PlayerDisconnected request to ChessHub when user disconnects
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.SendAsync("PlayerDisconnected", lobbyId);
+            await hubConnection.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Resets a game after modal is closed
+    /// </summary>
+    private async void RefreshModalOnClosed()
+    {
+        Reset();
+        await OnInitializedAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>
+    /// Sends a ResolveDraw request to ChessHub with a user draw input
+    /// </summary>
+    /// <param name="drawAccepted">If user accepted a draw</param>
+    private async void DrawModalOnClosed(bool drawAccepted)
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.SendAsync("ResolveDraw", lobbyId, drawAccepted);
+        }
+    }
+
+    /// <summary>
+    /// Process promotion and sends a ProcessMove request to ChessHub
+    /// </summary>
+    /// <param name="piece">Selected promotion piece</param>
+    private async void PromotionModalOnClosed(char? piece)
+    {
+        if (piece.HasValue)
+        {
+            // promotion piece is selected
+            if (hubConnection is not null && chosenTile is not null && promotionTile is not null)
+            {
+                // sends the promotion move
+                var move = new BlazorMove(chosenTile.Value, promotionTile.Value) { promotionCharPiece = piece };
+                await hubConnection.SendAsync("ProcessMove", lobbyId, JsonConvert.SerializeObject(move));
+
+                ResetStyles();
+                chosenTile = null;
+                Promotionpiece = piece;
+            }
+        }
+        else
+        {
+            promotionTile = null;
+        }
+    }
+
+    /// <summary>
+    /// Processes click on a chessboard tile
+    /// </summary>
+    /// <param name="x">Index on x axis of the clicked tile</param>
+    /// <param name="y">Index on y axis of the clicked tile</param>
+    private async void ProcessOnClick(int x, int y)
+    {
+        char clickedChar = Board[x, y];
+
+        if (BoardStyle[x, y] != null && BoardStyle[x, y].Contains("hover-style"))
+        {
+            // clicked on tile with movable piece
+
+            if (chosenTile == null)
+            {
+                // shows possible moves
+                SetPossibleMoves(PossibleMoves[(x, y)]);
+                chosenTile = (x, y);
+            }
+            else if (BoardStyle != null && BoardStyle[x, y].Contains("move"))
+            {
+                // makes a move
+                var move = new BlazorMove(chosenTile.Value, (x, y));
+
+                if (Board[chosenTile.Value.X, chosenTile.Value.Y] == BlazorConstants.WHITE_PAWN && y == BlazorConstants.CHESSBOARD_DIMENSION_LENGTH - 1)
+                {
+                    // white promotion move
+                    promotionTile = (x, y);
+                    List<(char, char)> pairs = new List<(char, char)>();
+                    foreach (var piece in BlazorConstants.WHITE_PROMOTION_PIECES)
+                    {
+                        pairs.Add((piece, convertCharToUnicode(piece)));
+                    }
+                    PromotionModal?.Open(pairs);
+                }
+                else if (Board[chosenTile.Value.X, chosenTile.Value.Y] == BlazorConstants.BLACK_PAWN && y == 0)
+                {
+                    // black promotion move
+                    promotionTile = (x, y);
+                    List<(char, char)> pairs = new List<(char, char)>();
+                    foreach (var piece in BlazorConstants.BLACK_PROMOTION_PIECES)
+                    {
+                        pairs.Add((piece, convertCharToUnicode(piece)));
+                    }
+                    PromotionModal?.Open(pairs);
+                }
+                else if (hubConnection is not null)
+                {
+                    // non-promotion move
+                    await hubConnection.SendAsync("ProcessMove", lobbyId, JsonConvert.SerializeObject(move));
+                    ResetStyles();
+                    chosenTile = null;
+                }
+            }
+            else
+            {
+                // clicked on own piece
+                ResetStyles();
+                SetHoverForPossibleMoves();
+
+                if (chosenTile.Value.X == x && chosenTile.Value.Y == y)
+                {
+                    // clicked on chosen tile => reset chosen tile
+                    chosenTile = null;
+                }
+                else
+                {
+                    SetPossibleMoves(PossibleMoves[(x, y)]);
+                    chosenTile = (x, y);
+                }
+            }
+        }
+        else if (chosenTile != null)
+        {
+            // clicked on non-movable tile => resets board
+            chosenTile = null;
+            ResetStyles();
+            SetHoverForPossibleMoves();
+        }
+
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// Adds hover style for possible move tiles
+    /// </summary>
+    private void SetHoverForPossibleMoves()
+    {
+        foreach ((int X, int Y) pos in PossibleMoves.Keys)
+        {
+            BoardStyle[pos.X, pos.Y] = BoardStyle[pos.X, pos.Y] == null ? " hover-style" : $"{BoardStyle[pos.X, pos.Y]} hover-style";
+        }
+    }
+
+    /// <summary>
+    /// Adds attacking style for attacks
+    /// </summary>
+    private void HighlightAttacks()
+    {
+        foreach (var move in attackingPos)
+        {
+            // highlights attacking pieces
+            BoardStyle[move.X, move.Y] = BoardStyle[move.X, move.Y] == null ? " attacking" : $"{BoardStyle[move.X, move.Y]} attacking";
+        }
+
+        if (checkedKing.HasValue)
+        {
+            // highlights defending king
+            BoardStyle[checkedKing.Value.X, checkedKing.Value.Y] = BoardStyle[checkedKing.Value.X, checkedKing.Value.Y] == null ? " checked" : $"{BoardStyle[checkedKing.Value.X, checkedKing.Value.Y]} checked";
+        }
+    }
+
+    /// <summary>
+    /// Adds move style for moves
+    /// </summary>
+    /// <param name="moves">Tiles of possible moves</param>
+    private void SetPossibleMoves(List<(int X, int Y)> moves)
+    {
+        foreach ((int X, int Y) pos in moves)
+        {
+            if (Board[pos.X, pos.Y] == BlazorConstants.EMPTY_TILE)
+            {
+                // move on an empty tile
+                BoardStyle[pos.X, pos.Y] = BoardStyle[pos.X, pos.Y] == null ? " hover-style move" : $"{BoardStyle[pos.X, pos.Y]} hover-style move";
+                Board[pos.X, pos.Y] = 'o';
+            }
+            else
+            {
+                // capture of enemy piece
+                BoardStyle[pos.X, pos.Y] = BoardStyle[pos.X, pos.Y] == null ? " hover-style move-capture" : $"{BoardStyle[pos.X, pos.Y]} hover-style move-capture";
+            }
+        }
+    }
+
+    /// <summary>
+    /// Clears all styles on chessboard
+    /// </summary>
+    private void ResetStyles()
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            for (int j = 0; j < 8; j++)
+            {
+                if (BoardStyle[i, j] is not null)
+                {
+                    // tile contains move
+                    if (Board[i, j] == BlazorConstants.MOVE_CHAR)
+                    {
+                        Board[i, j] = BlazorConstants.EMPTY_TILE;
+                    }
+
+                    BoardStyle[i, j] = String.Empty;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Converts piece char to unicode char displaying a piece
+    /// </summary>
+    /// <param name="ch"></param>
+    /// <returns></returns>
+    private char convertCharToUnicode(char ch)
+    {
+        switch (ch)
+        {
+            case 'p':
+                return '\u2659';
+            case 'P':
+                return '\u265F';
+            case 'r':
+                return '\u2656';
+            case 'R':
+                return '\u265C';
+            case 'n':
+                return '\u2658';
+            case 'N':
+                return '\u265E';
+            case 'b':
+                return '\u2657';
+            case 'B':
+                return '\u265D';
+            case 'q':
+                return '\u2655';
+            case 'Q':
+                return '\u265B';
+            case 'k':
+                return '\u2654';
+            case 'K':
+                return '\u265A';
+            default:
+                return ch;
+        }
+    }
+}

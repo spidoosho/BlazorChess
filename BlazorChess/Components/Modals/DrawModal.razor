@@ -1,0 +1,50 @@
+﻿<div class="modal @ModalClass" tabindex="-1" role="dialog" style="display:@ModalDisplay">
+    <div class="modal-dialog mr-5" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Opponent offered draw</h5>
+            </div>
+            <div class="modal-body">
+                Do you want to accept a draw offer?
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary" data-dismiss="modal" @onclick="() => Close(true)">Yes</button>
+                <button type="button" class="btn btn-secondary" data-dismiss="modal" @onclick="() => Close(false)">No</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+@if (ShowBackdrop)
+{
+    <div class="modal-backdrop fade show"></div>
+}
+
+
+@code {
+    [Parameter]
+    public Action<bool>? OnModalClosed { get; set; }
+
+    public Guid Guid = Guid.NewGuid();
+    public string ModalDisplay = "none;";
+    public string ModalClass = "";
+    public bool ShowBackdrop = false;
+
+    public void Close(bool drawAccepted)
+    {
+        ModalDisplay = "none";
+        ModalClass = "";
+        ShowBackdrop = false;
+        InvokeAsync(StateHasChanged);
+        OnModalClosed?.Invoke(drawAccepted);
+    }
+
+    public void Open()
+    {
+        ModalDisplay = "block;";
+        ModalClass = "Show";
+        ShowBackdrop = true;
+        InvokeAsync(StateHasChanged);
+    }
+}
