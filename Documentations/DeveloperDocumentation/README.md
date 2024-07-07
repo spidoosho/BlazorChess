@@ -2,7 +2,7 @@
 
 BlazorChess is a [ASP.NET](https://dotnet.microsoft.com/en-us/apps/aspnet) web app using [Blazor](https://learn.microsoft.com/cs-cz/aspnet/core/blazor/) and [SignalR](https://dotnet.microsoft.com/en-us/apps/aspnet/signalr)
 
-In this document you will get an overview of the project. In other documents you can read more about specific parts of the project.
+In this document you will get an overview of the project. In other documents you can read more about specific parts of the project. But the main documentation is described in the code and in summaries.
 
 ## Modularity
 

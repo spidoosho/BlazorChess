@@ -16,4 +16,6 @@ BlazorView on its own does not provide any game logic, everything, including pie
 
 ChessHub implements Hub class for communication with BlazorView. It logically connects dependency injections and processes their outputs and sends it to the BlazorView.
 
+## BlazorChessMiddleware
+
 ChessHub's best friend is BlazorChessMiddleware. Dependency injections must provide methods implementations for the interface contracts. Also it defines UserState which can be serialized to be sent to BlazorView and BoardState which defines ChessCore output.
