@@ -588,7 +588,7 @@ namespace ChessCore
             // y-axis direction is dependent on pawn color
             var yDirection = state.Board[pawnPos.X, pawnPos.Y] == ChessCoreConstants.WHITE_PIECES_CHAR_ARR[ChessCoreConstants.PAWN_INDEX] ? 1 : -1;
             // y-axis start pawn column is dependent on pawn color
-            var startCol = state.Board[pawnPos.X, pawnPos.Y] == ChessCoreConstants.WHITE_PIECES_CHAR_ARR[ChessCoreConstants.PAWN_INDEX] ? 1 : 6;
+            var startCol = state.Board[pawnPos.X, pawnPos.Y] == ChessCoreConstants.WHITE_PIECES_CHAR_ARR[ChessCoreConstants.PAWN_INDEX] ? ChessCoreConstants.WHITE_PAWN_START_COL : ChessCoreConstants.BLACK_PAWN_START_COL;
 
             var opponentCharPieces = state.Board[pawnPos.X, pawnPos.Y] == ChessCoreConstants.WHITE_PIECES_CHAR_ARR[ChessCoreConstants.PAWN_INDEX] ?
                 ChessCoreConstants.BLACK_PIECES_CHAR_ARR : ChessCoreConstants.WHITE_PIECES_CHAR_ARR;
